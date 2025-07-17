@@ -17,9 +17,6 @@ logging.basicConfig(
 )
 
 
-
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id,
                                    text="欢迎使用DouJin机器人！为您自动获取指定本子哟，祝起飞愉快~⭐")
@@ -35,7 +32,9 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 获取指令后参数
     args = context.args
+    # 如果是jm_id
     if len(context.args) >= 1 and args[0].isdigit():
         try:
             jm_id = args[0]
@@ -43,6 +42,8 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             album: JmAlbumDetail = client.get_album_detail(jm_id)
             name = album.name
             download_album(jm_id, option)
+            await context.bot.send_message(chat_id=update.effective_chat.id,
+                                           text=f'正在获取，请稍后…')
             # await context.bot.send_photo(chat_id=update.effective_chat.id,
             #                                text=name)
             with open(f'download/{jm_id}/00001.jpg', 'rb') as f:
@@ -51,9 +52,12 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     photo=f,
                     caption=name
                 )
-            # # 发送图片，10张打包
+            # BUG：服务器上的文件似乎没排序，需要先排序
             image_paths = glob.glob(f'./download/{jm_id}/*.jpg')
-            print(image_paths)
+            # 按照文件名中的数字排序
+            image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x).group()))
+            # 发送图片，10张打包
+            # print(image_paths)
             batch_size = 10
             for i in range(0, len(image_paths), batch_size):
                 media_group = []
@@ -62,7 +66,7 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     with open(path, "rb") as f:
                         media_group.append(InputMediaPhoto(media=f.read()))
 
-                print(media_group)
+                # print(media_group)
 
                 if media_group:
                     await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media_group)
