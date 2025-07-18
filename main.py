@@ -1,5 +1,8 @@
 import glob
 import logging
+import re
+import requests
+import json
 import jmcomic
 from jmcomic import *
 from telegram import Update, InputMediaPhoto
@@ -10,6 +13,10 @@ from options import *
 # JM客户端创建
 option = jmcomic.create_option_by_file('./option.yml')
 client = option.new_jm_client()
+
+# Telegraph功能开关 (当Telegraph服务不可用时可以关闭)
+TELEGRAPH_ENABLED = True
+TELEGRAPH_THRESHOLD = 10  # 超过多少张图片时使用Telegraph
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -25,6 +32,69 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bind_pica(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id,
                                    text="请输入哔咔账号与密码 本bot承诺不会存储任何信息")
+
+
+def upload_to_telegraph(image_path):
+    """上传图片到Telegraph并返回URL"""
+    try:
+        with open(image_path, 'rb') as f:
+            url = 'https://telegra.ph/upload'
+            files = {'file': ('file', f, 'image/jpeg')}
+            response = requests.post(url, files=files, timeout=30)
+            if response.status_code == 200:
+                result = json.loads(response.content)
+                return f'https://telegra.ph{result[0]["src"]}'
+            else:
+                return None
+    except Exception as e:
+        print(f"上传到Telegraph失败: {e}")
+        return None
+
+
+def create_telegraph_page(title, image_urls):
+    """创建Telegraph页面包含所有图片"""
+    try:
+        # 构建页面内容
+        content = []
+        for i, url in enumerate(image_urls, 1):
+            content.extend([
+                {'tag': 'figure', 'children': [
+                    {'tag': 'img', 'attrs': {'src': url}},
+                    {'tag': 'figcaption', 'children': [f'第{i}页']}
+                ]},
+                {'tag': 'br'}
+            ])
+        
+        # 创建Telegraph页面
+        telegraph_data = {
+            'title': title,
+            'content': json.dumps(content),
+            'return_content': 'true'
+        }
+        
+        response = requests.post('https://api.telegra.ph/createPage', data=telegraph_data, timeout=30)
+        if response.status_code == 200:
+            result = response.json()
+            if result['ok']:
+                return f"https://telegra.ph/{result['result']['path']}"
+        return None
+    except Exception as e:
+        print(f"创建Telegraph页面失败: {e}")
+        return None
+
+
+async def send_images_traditional(context, chat_id, image_paths):
+    """传统方式发送图片，10张打包"""
+    batch_size = 10
+    for i in range(0, len(image_paths), batch_size):
+        media_group = []
+        
+        for path in image_paths[i:i + batch_size]:
+            with open(path, "rb") as f:
+                media_group.append(InputMediaPhoto(media=f.read()))
+        
+        if media_group:
+            await context.bot.send_media_group(chat_id=chat_id, media=media_group)
 
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -52,24 +122,43 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     photo=f,
                     caption=name
                 )
-            # BUG：服务器上的文件似乎没排序，需要先排序
+            # 获取所有图片文件并排序
             image_paths = glob.glob(f'./download/{jm_id}/*.jpg')
-            # 按照文件名中的数字排序
-            image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x).group()))
-            # 发送图片，10张打包
-            # print(image_paths)
-            batch_size = 10
-            for i in range(0, len(image_paths), batch_size):
-                media_group = []
-
-                for path in image_paths[i:i + batch_size]:
-                    with open(path, "rb") as f:
-                        media_group.append(InputMediaPhoto(media=f.read()))
-
-                # print(media_group)
-
-                if media_group:
-                    await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media_group)
+            # 改进的排序逻辑：按照文件名中的数字排序
+            image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x.split('/')[-1]).group()))
+            
+            # 选择发送方式：Telegraph或直接发送
+            if TELEGRAPH_ENABLED and len(image_paths) > TELEGRAPH_THRESHOLD:
+                # 图片数量较多时，尝试上传到Telegraph
+                await context.bot.send_message(chat_id=update.effective_chat.id,
+                                             text=f'图片较多({len(image_paths)}张)，正在上传到Telegraph...')
+                
+                # 上传所有图片到Telegraph
+                telegraph_urls = []
+                for path in image_paths:
+                    url = upload_to_telegraph(path)
+                    if url:
+                        telegraph_urls.append(url)
+                
+                if telegraph_urls:
+                    # 创建Telegraph页面
+                    telegraph_page = create_telegraph_page(name, telegraph_urls)
+                    if telegraph_page:
+                        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                                     text=f'✅ 已上传到Telegraph：{telegraph_page}')
+                    else:
+                        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                                     text='❌ 创建Telegraph页面失败，使用传统方式发送...')
+                        # 回退到原有方式
+                        await send_images_traditional(context, update.effective_chat.id, image_paths)
+                else:
+                    await context.bot.send_message(chat_id=update.effective_chat.id,
+                                                 text='❌ 上传Telegraph失败，使用传统方式发送...')
+                    # 回退到原有方式
+                    await send_images_traditional(context, update.effective_chat.id, image_paths)
+            else:
+                # 图片数量较少时，或Telegraph已禁用，直接发送
+                await send_images_traditional(context, update.effective_chat.id, image_paths)
 
         except MissingAlbumPhotoException as e:
             await context.bot.send_message(chat_id=update.effective_chat.id,
