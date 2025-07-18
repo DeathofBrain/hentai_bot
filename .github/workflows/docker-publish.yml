@@ -34,4 +34,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/yiniruohong/hentai_bot:latest
+          tags: ghcr.io/${{ github.repository_owner }}/hentai_bot:latest
