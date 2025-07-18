@@ -5,16 +5,21 @@
 ### 🔧 Bug Fixes
 - Fixed image ordering issue caused by missing `re` module import
 - Improved image sorting logic to handle numeric ordering correctly
+- Added retry logic for download failures (3 attempts)
+- Better error handling and user feedback
 
 ### ✨ New Features
-- **Telegraph Upload Support**: Automatically uploads large image sets (>10 images) to Telegraph for better handling
-- **Smart Sending Strategy**: 
-  - ≤10 images: Direct Telegram sending (traditional method)
-  - >10 images: Upload to Telegraph and return a single link
-- **Fallback Mechanism**: If Telegraph upload fails, automatically falls back to traditional method
+- **ZIP Archive Support**: Automatically creates and sends ZIP files for large image sets
+- **Smart Archive Strategy**: 
+  - ≤5 images: Direct Telegram sending only
+  - >5 images: Send images + ZIP archive
+- **Intelligent File Management**: 
+  - Automatic file size checking (50MB Telegram limit)
+  - Ordered file naming in ZIP (001.jpg, 002.jpg, etc.)
+  - Automatic cleanup after sending
 - **Configuration Options**: 
-  - `TELEGRAPH_ENABLED`: Enable/disable Telegraph functionality
-  - `TELEGRAPH_THRESHOLD`: Set the threshold for using Telegraph (default: 10 images)
+  - `ENABLE_ZIP_ARCHIVE`: Enable/disable ZIP archive functionality
+  - `ZIP_THRESHOLD`: Set the threshold for creating ZIP archives (default: 5 images)
 
 ## Testing with Docker
 
@@ -34,27 +39,29 @@ docker run -d \
 
 ### Configuration Notes
 
-1. **Telegraph Configuration**: 
-   - Telegraph functionality is enabled by default
-   - If Telegraph service is unavailable, the bot will automatically fall back to traditional sending
-   - You can disable Telegraph by setting `TELEGRAPH_ENABLED = False` in main.py
+1. **ZIP Archive Configuration**: 
+   - ZIP archive functionality is enabled by default
+   - Archives are created for image sets with more than 5 images
+   - You can disable archives by setting `ENABLE_ZIP_ARCHIVE = False` in main.py
 
 2. **Image Threshold**:
-   - Default threshold is 10 images
-   - Adjust `TELEGRAPH_THRESHOLD` in main.py to change when Telegraph is used
+   - Default threshold is 5 images
+   - Adjust `ZIP_THRESHOLD` in main.py to change when ZIP archives are created
 
 ### Testing Checklist
 
-- [ ] Test with small image sets (≤10 images) - should use direct Telegram sending
-- [ ] Test with large image sets (>10 images) - should attempt Telegraph upload
-- [ ] Verify image ordering is correct
-- [ ] Test fallback mechanism when Telegraph is unavailable
-- [ ] Verify bot responds appropriately to invalid inputs
+- [ ] Test with small image sets (≤5 images) - should only send images directly
+- [ ] Test with large image sets (>5 images) - should send images + ZIP archive
+- [ ] Verify image ordering is correct in both direct sending and ZIP archive
+- [ ] Test ZIP archive creation and sending
+- [ ] Verify file size limits are respected (50MB max)
+- [ ] Check automatic cleanup of temporary ZIP files
 
 ### Known Limitations
 
-- Telegraph upload API has been restricted due to abuse, so it may not work in all cases
-- The bot includes robust fallback mechanisms to ensure functionality even when Telegraph is unavailable
+- ZIP archives are subject to Telegram's 50MB file size limit
+- Large image sets may result in large ZIP files that exceed the limit
+- The bot automatically handles file size checking and cleanup
 
 ## Reverting Changes
 

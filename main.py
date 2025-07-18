@@ -1,10 +1,9 @@
 import glob
 import logging
 import re
-import requests
-import json
 import os
 import time
+import zipfile
 import jmcomic
 from jmcomic import *
 from telegram import Update, InputMediaPhoto
@@ -19,24 +18,9 @@ option.client.retry_times = 3
 option.client.timeout = 30
 client = option.new_jm_client()
 
-# Telegraph功能开关 (当Telegraph服务不可用时可以关闭)
-TELEGRAPH_ENABLED = True
-TELEGRAPH_THRESHOLD = 10  # 超过多少张图片时使用Telegraph
-
-# 测试Telegraph是否可用
-def test_telegraph_availability():
-    """测试Telegraph服务是否可用"""
-    try:
-        response = requests.get('https://telegra.ph', timeout=5)
-        return response.status_code == 200
-    except:
-        return False
-
-# 在启动时检查Telegraph可用性
-if TELEGRAPH_ENABLED:
-    if not test_telegraph_availability():
-        print("⚠️  Telegraph服务不可用，已自动禁用")
-        TELEGRAPH_ENABLED = False
+# 压缩包配置
+ENABLE_ZIP_ARCHIVE = True  # 是否在发送完图片后提供压缩包
+ZIP_THRESHOLD = 5  # 超过多少张图片时提供压缩包
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -54,67 +38,33 @@ async def bind_pica(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    text="请输入哔咔账号与密码 本bot承诺不会存储任何信息")
 
 
-def upload_to_telegraph(image_path):
-    """上传图片到Telegraph并返回URL"""
+def create_zip_archive(image_paths, zip_name):
+    """创建图片压缩包"""
     try:
-        # 检测文件类型
-        file_ext = image_path.lower().split('.')[-1]
-        content_type = 'image/jpeg'
-        if file_ext in ['png']:
-            content_type = 'image/png'
-        elif file_ext in ['gif']:
-            content_type = 'image/gif'
+        zip_path = f"download/{zip_name}.zip"
         
-        with open(image_path, 'rb') as f:
-            url = 'https://telegra.ph/upload'
-            files = {'file': (f'image.{file_ext}', f, content_type)}
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.post(url, files=files, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                    if isinstance(result, list) and len(result) > 0 and 'src' in result[0]:
-                        return f'https://telegra.ph{result[0]["src"]}'
-                    else:
-                        print(f"Telegraph返回格式错误: {result}")
-                        return None
-                except json.JSONDecodeError:
-                    print(f"Telegraph返回非JSON格式: {response.text}")
-                    return None
-            else:
-                print(f"Telegraph上传失败: HTTP {response.status_code}, {response.text}")
-                return None
+        # 确保下载目录存在
+        os.makedirs(os.path.dirname(zip_path), exist_ok=True)
+        
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for i, image_path in enumerate(image_paths):
+                if os.path.exists(image_path):
+                    # 获取文件名并重命名为有序的格式
+                    file_ext = os.path.splitext(image_path)[1]
+                    new_name = f"{i+1:03d}{file_ext}"
+                    zipf.write(image_path, new_name)
+        
+        return zip_path if os.path.exists(zip_path) else None
     except Exception as e:
-        print(f"上传到Telegraph失败: {e}")
+        print(f"创建压缩包失败: {e}")
         return None
 
-
-def create_telegraph_page(title, image_urls):
-    """创建Telegraph页面包含所有图片"""
-    # 由于Telegraph页面创建需要access token，我们改用简单的方式
-    # 直接返回第一张图片的URL作为代表，并在消息中列出所有图片
-    if image_urls:
-        message = f"📸 {title}\n\n包含 {len(image_urls)} 张图片:\n"
-        # 显示前5个URL
-        for i, url in enumerate(image_urls[:5]):
-            message += f"{i+1}. {url}\n"
-        if len(image_urls) > 5:
-            message += f"... 还有 {len(image_urls)-5} 张图片"
-        return message
-    return None
-
-def create_image_summary(title, image_paths):
-    """创建图片摘要信息，不依赖Telegraph"""
-    if image_paths:
-        message = f"📸 {title}\n\n"
-        message += f"共 {len(image_paths)} 张图片已准备就绪\n"
-        message += f"由于图片数量较多，将分批发送（每批最多10张）\n"
-        message += f"预计发送 {(len(image_paths) + 9) // 10} 批次"
-        return message
-    return None
+def get_file_size_mb(file_path):
+    """获取文件大小（MB）"""
+    try:
+        return os.path.getsize(file_path) / (1024 * 1024)
+    except:
+        return 0
 
 
 async def send_images_traditional(context, chat_id, image_paths):
@@ -189,42 +139,48 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 改进的排序逻辑：按照文件名中的数字排序
             image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x.split('/')[-1]).group()))
             
-            # 选择发送方式：Telegraph或直接发送
-            if TELEGRAPH_ENABLED and len(image_paths) > TELEGRAPH_THRESHOLD:
-                # 图片数量较多时，尝试上传到Telegraph
+            # 发送图片
+            if len(image_paths) > 10:
                 await context.bot.send_message(chat_id=update.effective_chat.id,
-                                             text=f'图片较多({len(image_paths)}张)，正在尝试上传到Telegraph...')
+                                             text=f'图片较多({len(image_paths)}张)，将分批发送...')
+            
+            # 发送所有图片
+            await send_images_traditional(context, update.effective_chat.id, image_paths)
+            
+            # 如果图片数量超过阈值，创建并发送压缩包
+            if ENABLE_ZIP_ARCHIVE and len(image_paths) > ZIP_THRESHOLD:
+                await context.bot.send_message(chat_id=update.effective_chat.id,
+                                             text='📦 正在创建压缩包...')
                 
-                # 上传少量图片到Telegraph作为示例
-                sample_size = min(3, len(image_paths))  # 只上传前3张作为示例
-                telegraph_urls = []
-                for i in range(sample_size):
-                    url = upload_to_telegraph(image_paths[i])
-                    if url:
-                        telegraph_urls.append(url)
-                
-                if telegraph_urls:
-                    # 创建Telegraph消息
-                    telegraph_message = create_telegraph_page(name, telegraph_urls)
-                    if telegraph_message:
-                        await context.bot.send_message(chat_id=update.effective_chat.id,
-                                                     text=f'✅ 预览图片已上传到Telegraph:\n\n{telegraph_message}')
+                zip_path = create_zip_archive(image_paths, f"{name}_{jm_id}")
+                if zip_path:
+                    file_size = get_file_size_mb(zip_path)
                     
-                    # 发送提示消息
-                    summary_message = create_image_summary(name, image_paths)
-                    if summary_message:
+                    # Telegram文件大小限制是50MB
+                    if file_size <= 50:
+                        try:
+                            with open(zip_path, 'rb') as zip_file:
+                                await context.bot.send_document(
+                                    chat_id=update.effective_chat.id,
+                                    document=zip_file,
+                                    filename=f"{name}.zip",
+                                    caption=f"📦 完整压缩包\n📊 大小: {file_size:.1f}MB\n📷 包含: {len(image_paths)}张图片"
+                                )
+                            
+                            # 发送完成后删除压缩包
+                            os.remove(zip_path)
+                            
+                        except Exception as e:
+                            await context.bot.send_message(chat_id=update.effective_chat.id,
+                                                         text=f'❌ 发送压缩包失败: {str(e)}')
+                    else:
                         await context.bot.send_message(chat_id=update.effective_chat.id,
-                                                     text=summary_message)
-                    
-                    # 继续使用传统方式发送所有图片
-                    await send_images_traditional(context, update.effective_chat.id, image_paths)
+                                                     text=f'❌ 压缩包太大({file_size:.1f}MB)，超过Telegram 50MB限制')
+                        # 删除过大的压缩包
+                        os.remove(zip_path)
                 else:
                     await context.bot.send_message(chat_id=update.effective_chat.id,
-                                                 text='❌ Telegraph上传失败，使用传统方式发送...')
-                    await send_images_traditional(context, update.effective_chat.id, image_paths)
-            else:
-                # 图片数量较少时，或Telegraph已禁用，直接发送
-                await send_images_traditional(context, update.effective_chat.id, image_paths)
+                                                 text='❌ 创建压缩包失败')
 
         except MissingAlbumPhotoException as e:
             await context.bot.send_message(chat_id=update.effective_chat.id,
