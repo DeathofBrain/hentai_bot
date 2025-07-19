@@ -8,10 +8,10 @@ services:
     volumes:
       # 持久化存储下载和缓存
       - ./data/download:/app/download
-      # JM Comic配置文件
-      - ./data/option.yml:/app/option.yml
-      # 环境变量文件映射
-      - ./.env:/app/.env
+      # 环境变量文件映射（可选）
+      - ./.env:/app/.env:ro
+      # JM Comic配置文件（可选，如果存在的话）
+      # - ./data/option.yml:/app/option.yml:ro
     environment:
       # Required: Telegram Bot Token
       BOT_TOKEN: "${BOT_TOKEN:-}"

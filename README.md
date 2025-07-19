@@ -38,10 +38,10 @@
 cp .env.example .env
 # 编辑 .env 文件，设置你的机器人 token
 
-# 创建数据目录和配置
+# 创建数据目录
 mkdir -p data
-cp option.yml.example data/option.yml
-# 根据需要编辑 data/option.yml
+# 可选：如需自定义JM配置，复制并编辑配置文件
+# cp option.yml.example option.yml
 ```
 
 2. **启动服务**
@@ -100,11 +100,13 @@ docker run -d \
 volumes:
   # 持久化存储下载和缓存
   - ./data/download:/app/download
-  # JM Comic 配置文件
-  - ./data/option.yml:/app/option.yml
-  # 环境变量文件映射
-  - ./.env:/app/.env
+  # 环境变量文件映射（可选）
+  - ./.env:/app/.env:ro
+  # JM Comic 配置文件（可选，如果需要自定义配置）
+  # - ./option.yml:/app/option.yml:ro
 ```
+
+**注意：** JM配置文件是可选的，程序会自动使用内置的默认配置。
 
 ## 🤖 使用说明
 

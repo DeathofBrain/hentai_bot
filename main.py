@@ -73,11 +73,31 @@ SHOW_DOWNLOAD_PROGRESS = get_env_bool('SHOW_DOWNLOAD_PROGRESS', True)
 PROGRESS_UPDATE_INTERVAL = get_env_int('PROGRESS_UPDATE_INTERVAL', 5)
 
 # JM客户端创建
-option = jmcomic.create_option_by_file('./option.yml')
-# 添加重试和超时配置
-option.client.retry_times = JM_RETRY_TIMES
-option.client.timeout = JM_TIMEOUT
-client = option.new_jm_client()
+def create_jm_client():
+    """创建JM客户端，支持多种配置文件路径"""
+    config_paths = ['./option.yml', './option.yml.example']
+    
+    for config_path in config_paths:
+        try:
+            if os.path.exists(config_path) and os.path.isfile(config_path):
+                option = jmcomic.create_option_by_file(config_path)
+                # 添加重试和超时配置
+                option.client.retry_times = JM_RETRY_TIMES
+                option.client.timeout = JM_TIMEOUT
+                print(f"✅ 使用配置文件: {config_path}")
+                return option.new_jm_client()
+        except Exception as e:
+            print(f"⚠️ 无法读取配置文件 {config_path}: {e}")
+            continue
+    
+    # 如果所有配置文件都失败，使用默认配置
+    print("ℹ️ 使用默认配置创建客户端")
+    option = jmcomic.create_option('./download/', rule='Bd / Pid')
+    option.client.retry_times = JM_RETRY_TIMES
+    option.client.timeout = JM_TIMEOUT
+    return option.new_jm_client()
+
+client = create_jm_client()
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
