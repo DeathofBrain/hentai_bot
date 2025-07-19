@@ -40,8 +40,6 @@ cp .env.example .env
 
 # 创建数据目录
 mkdir -p data
-# 可选：如需自定义JM配置，复制并编辑配置文件
-# cp option.yml.example option.yml
 ```
 
 2. **启动服务**
@@ -102,11 +100,9 @@ volumes:
   - ./data/download:/app/download
   # 环境变量文件映射（可选）
   - ./.env:/app/.env:ro
-  # JM Comic 配置文件（可选，如果需要自定义配置）
-  # - ./option.yml:/app/option.yml:ro
 ```
 
-**注意：** JM配置文件是可选的，程序会自动使用内置的默认配置。
+**注意：** JM配置文件已内置在Docker镜像中，无需额外映射。
 
 ## 🤖 使用说明
 
@@ -132,10 +128,9 @@ hentai_bot/
 ├── Dockerfile          # Docker 构建文件
 ├── docker-compose.yml  # Docker Compose 配置
 ├── .env.example        # 环境变量模板
-├── option.yml.example  # JM 客户端配置模板
+├── option.yml          # JM 客户端配置（内置）
 └── data/               # 数据目录
-    ├── download/       # 下载文件存储
-    └── option.yml      # JM 客户端配置
+    └── download/       # 下载文件存储
 ```
 
 ## ⚡ 智能特性
