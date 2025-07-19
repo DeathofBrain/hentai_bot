@@ -5,7 +5,6 @@ import os
 import time
 import zipfile
 import json
-import sqlite3
 import datetime
 import threading
 import shutil
@@ -14,29 +13,56 @@ from jmcomic import *
 from telegram import Update, InputMediaPhoto
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, filters, MessageHandler
 
-from options import *
+# 环境变量配置
+def get_env_bool(key, default=False):
+    """获取布尔型环境变量"""
+    value = os.getenv(key, str(default)).lower()
+    return value in ('true', '1', 'yes', 'on')
+
+def get_env_int(key, default=0):
+    """获取整型环境变量"""
+    try:
+        return int(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+def get_env_float(key, default=0.0):
+    """获取浮点型环境变量"""
+    try:
+        return float(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+# Bot配置
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is required")
+
+# JM客户端配置
+JM_RETRY_TIMES = get_env_int('JM_RETRY_TIMES', 3)
+JM_TIMEOUT = get_env_int('JM_TIMEOUT', 30)
+
+# 压缩包配置
+ENABLE_ZIP_ARCHIVE = get_env_bool('ENABLE_ZIP_ARCHIVE', True)
+ZIP_THRESHOLD = get_env_int('ZIP_THRESHOLD', 5)
+
+# 存储管理配置
+ENABLE_STORAGE_MANAGEMENT = get_env_bool('ENABLE_STORAGE_MANAGEMENT', True)
+MAX_STORAGE_SIZE_GB = get_env_float('MAX_STORAGE_SIZE_GB', 2.0)
+KEEP_DAYS = get_env_int('KEEP_DAYS', 7)
+CLEANUP_INTERVAL_HOURS = get_env_int('CLEANUP_INTERVAL_HOURS', 6)
+CACHE_DB_PATH = os.getenv('CACHE_DB_PATH', 'download/cache.db')
+
+# 下载进度配置
+SHOW_DOWNLOAD_PROGRESS = get_env_bool('SHOW_DOWNLOAD_PROGRESS', True)
+PROGRESS_UPDATE_INTERVAL = get_env_int('PROGRESS_UPDATE_INTERVAL', 5)
 
 # JM客户端创建
 option = jmcomic.create_option_by_file('./option.yml')
 # 添加重试和超时配置
-option.client.retry_times = 3
-option.client.timeout = 30
+option.client.retry_times = JM_RETRY_TIMES
+option.client.timeout = JM_TIMEOUT
 client = option.new_jm_client()
-
-# 压缩包配置
-ENABLE_ZIP_ARCHIVE = True  # 是否在发送完图片后提供压缩包
-ZIP_THRESHOLD = 5  # 超过多少张图片时提供压缩包
-
-# 存储管理配置
-ENABLE_STORAGE_MANAGEMENT = True  # 启用存储管理
-MAX_STORAGE_SIZE_GB = 2.0  # 最大存储空间（GB）
-KEEP_DAYS = 7  # 保留天数
-CLEANUP_INTERVAL_HOURS = 6  # 清理检查间隔（小时）
-CACHE_DB_PATH = 'download/cache.db'  # 缓存数据库路径
-
-# 下载进度配置
-SHOW_DOWNLOAD_PROGRESS = True  # 显示下载进度
-PROGRESS_UPDATE_INTERVAL = 5  # 进度更新间隔（张图片）
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -45,61 +71,53 @@ logging.basicConfig(
 
 
 class StorageManager:
-    """存储管理器"""
+    """存储管理器 - 简化版，仅负责缓存和清理"""
     
     def __init__(self):
-        self.db_path = CACHE_DB_PATH
-        self.init_database()
+        self.cache_file = CACHE_DB_PATH
+        self.init_cache_tracking()
         self.start_cleanup_scheduler()
     
-    def init_database(self):
-        """初始化数据库"""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+    def init_cache_tracking(self):
+        """初始化缓存跟踪文件"""
+        if CACHE_DB_PATH.endswith('.db'):
+            # 使用简单的JSON文件而不是数据库
+            self.cache_file = CACHE_DB_PATH.replace('.db', '.json')
+        else:
+            self.cache_file = CACHE_DB_PATH
         
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS downloads (
-                    jm_id TEXT PRIMARY KEY,
-                    name TEXT,
-                    download_time TIMESTAMP,
-                    access_time TIMESTAMP,
-                    file_count INTEGER,
-                    folder_size_bytes INTEGER,
-                    user_id INTEGER
-                )
-            ''')
-            
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS user_stats (
-                    user_id INTEGER PRIMARY KEY,
-                    total_downloads INTEGER DEFAULT 0,
-                    last_download_time TIMESTAMP,
-                    total_images_downloaded INTEGER DEFAULT 0
-                )
-            ''')
+        # 确保目录存在
+        cache_dir = os.path.dirname(self.cache_file)
+        if cache_dir:  # 只有当目录不为空时才创建
+            os.makedirs(cache_dir, exist_ok=True)
+        
+        if not os.path.exists(self.cache_file):
+            with open(self.cache_file, 'w') as f:
+                json.dump({}, f)
     
-    def record_download(self, jm_id, name, user_id, file_count, folder_size):
-        """记录下载"""
-        now = datetime.datetime.now()
+    def record_download(self, jm_id, name, file_count, folder_size):
+        """记录下载到缓存"""
+        now = datetime.datetime.now().isoformat()
         
-        with sqlite3.connect(self.db_path) as conn:
-            # 记录下载
-            conn.execute('''
-                INSERT OR REPLACE INTO downloads 
-                (jm_id, name, download_time, access_time, file_count, folder_size_bytes, user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (jm_id, name, now, now, file_count, folder_size, user_id))
-            
-            # 更新用户统计
-            conn.execute('''
-                INSERT OR REPLACE INTO user_stats 
-                (user_id, total_downloads, last_download_time, total_images_downloaded)
-                VALUES (?, 
-                    COALESCE((SELECT total_downloads FROM user_stats WHERE user_id = ?), 0) + 1,
-                    ?,
-                    COALESCE((SELECT total_images_downloaded FROM user_stats WHERE user_id = ?), 0) + ?
-                )
-            ''', (user_id, user_id, now, user_id, file_count))
+        try:
+            with open(self.cache_file, 'r') as f:
+                cache_data = json.load(f)
+        except:
+            cache_data = {}
+        
+        cache_data[jm_id] = {
+            'name': name,
+            'download_time': now,
+            'access_time': now,
+            'file_count': file_count,
+            'folder_size_bytes': folder_size
+        }
+        
+        try:
+            with open(self.cache_file, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+        except Exception as e:
+            print(f"缓存记录失败: {e}")
     
     def is_cached(self, jm_id):
         """检查是否已缓存"""
@@ -108,11 +126,17 @@ class StorageManager:
             return False
         
         # 更新访问时间
-        now = datetime.datetime.now()
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
-                UPDATE downloads SET access_time = ? WHERE jm_id = ?
-            ''', (now, jm_id))
+        try:
+            with open(self.cache_file, 'r') as f:
+                cache_data = json.load(f)
+            
+            if jm_id in cache_data:
+                cache_data[jm_id]['access_time'] = datetime.datetime.now().isoformat()
+                
+                with open(self.cache_file, 'w') as f:
+                    json.dump(cache_data, f, indent=2)
+        except Exception as e:
+            print(f"更新访问时间失败: {e}")
         
         return True
     
@@ -143,36 +167,56 @@ class StorageManager:
             total_size = self.get_total_storage_size()
             max_size_bytes = MAX_STORAGE_SIZE_GB * 1024 * 1024 * 1024
             
-            with sqlite3.connect(self.db_path) as conn:
-                # 获取需要清理的项目（按访问时间排序）
-                cursor = conn.execute('''
-                    SELECT jm_id, folder_size_bytes FROM downloads 
-                    WHERE access_time < ? OR ? > ?
-                    ORDER BY access_time ASC
-                ''', (cutoff_time, total_size, max_size_bytes))
+            # 读取缓存数据
+            try:
+                with open(self.cache_file, 'r') as f:
+                    cache_data = json.load(f)
+            except:
+                cache_data = {}
+            
+            # 获取需要清理的项目
+            items_to_clean = []
+            for jm_id, data in cache_data.items():
+                try:
+                    access_time = datetime.datetime.fromisoformat(data['access_time'])
+                    if access_time < cutoff_time or total_size > max_size_bytes:
+                        items_to_clean.append((jm_id, access_time, data.get('folder_size_bytes', 0)))
+                except:
+                    continue
+            
+            # 按访问时间排序（最旧的先清理）
+            items_to_clean.sort(key=lambda x: x[1])
+            
+            cleaned_count = 0
+            freed_space = 0
+            
+            for jm_id, access_time, folder_size in items_to_clean:
+                folder_path = f'download/{jm_id}'
+                if os.path.exists(folder_path):
+                    try:
+                        shutil.rmtree(folder_path)
+                        freed_space += folder_size or 0
+                        cleaned_count += 1
+                        
+                        # 从缓存删除记录
+                        if jm_id in cache_data:
+                            del cache_data[jm_id]
+                        
+                        # 如果释放了足够空间，停止清理
+                        if total_size - freed_space <= max_size_bytes:
+                            break
+                    except Exception as e:
+                        print(f"清理失败 {jm_id}: {e}")
+            
+            # 更新缓存文件
+            if cleaned_count > 0:
+                try:
+                    with open(self.cache_file, 'w') as f:
+                        json.dump(cache_data, f, indent=2)
+                except:
+                    pass
                 
-                cleaned_count = 0
-                freed_space = 0
-                
-                for jm_id, folder_size in cursor.fetchall():
-                    folder_path = f'download/{jm_id}'
-                    if os.path.exists(folder_path):
-                        try:
-                            shutil.rmtree(folder_path)
-                            freed_space += folder_size or 0
-                            cleaned_count += 1
-                            
-                            # 从数据库删除记录
-                            conn.execute('DELETE FROM downloads WHERE jm_id = ?', (jm_id,))
-                            
-                            # 如果释放了足够空间，停止清理
-                            if total_size - freed_space <= max_size_bytes:
-                                break
-                        except Exception as e:
-                            print(f"清理失败 {jm_id}: {e}")
-                
-                if cleaned_count > 0:
-                    print(f"清理完成: 删除了{cleaned_count}个文件夹，释放了{freed_space/1024/1024:.1f}MB空间")
+                print(f"清理完成: 删除了{cleaned_count}个文件夹，释放了{freed_space/1024/1024:.1f}MB空间")
         
         except Exception as e:
             print(f"清理过程出错: {e}")
@@ -187,38 +231,13 @@ class StorageManager:
         if ENABLE_STORAGE_MANAGEMENT:
             cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
             cleanup_thread.start()
-    
-    def get_user_stats(self, user_id):
-        """获取用户统计"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('''
-                SELECT total_downloads, last_download_time, total_images_downloaded 
-                FROM user_stats WHERE user_id = ?
-            ''', (user_id,))
-            
-            result = cursor.fetchone()
-            if result:
-                return {
-                    'total_downloads': result[0],
-                    'last_download_time': result[1],
-                    'total_images_downloaded': result[2]
-                }
-            return None
 
 # 初始化存储管理器
 storage_manager = StorageManager()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_stats = storage_manager.get_user_stats(update.effective_user.id)
-    
     welcome_msg = "欢迎使用DouJin机器人！为您自动获取指定本子哟，祝起飞愉快~⭐"
-    
-    if user_stats:
-        welcome_msg += f"\n\n📊 您的统计:\n"
-        welcome_msg += f"📚 总下载: {user_stats['total_downloads']}个\n"
-        welcome_msg += f"🖼️ 总图片: {user_stats['total_images_downloaded']}张"
-    
     await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_msg)
 
 
@@ -274,35 +293,6 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text=update.message.text)
 
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示用户统计和系统状态"""
-    user_id = update.effective_user.id
-    user_stats = storage_manager.get_user_stats(user_id)
-    
-    # 系统存储信息
-    total_size = storage_manager.get_total_storage_size()
-    total_size_mb = total_size / (1024 * 1024)
-    max_size_mb = MAX_STORAGE_SIZE_GB * 1024
-    
-    msg = f"📊 **统计信息**\n\n"
-    
-    if user_stats:
-        msg += f"👤 **您的统计:**\n"
-        msg += f"📚 总下载: {user_stats['total_downloads']}个\n"
-        msg += f"🖼️ 总图片: {user_stats['total_images_downloaded']}张\n"
-        if user_stats['last_download_time']:
-            msg += f"🕒 最后下载: {user_stats['last_download_time'][:19]}\n"
-    else:
-        msg += f"👤 **您还没有下载记录**\n"
-    
-    msg += f"\n🗄️ **系统存储:**\n"
-    msg += f"💾 当前使用: {total_size_mb:.1f}MB / {max_size_mb:.0f}MB\n"
-    msg += f"📁 保留期限: {KEEP_DAYS}天\n"
-    msg += f"🧹 清理间隔: {CLEANUP_INTERVAL_HOURS}小时\n"
-    
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='Markdown')
-
-
 async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """手动触发清理"""
     await context.bot.send_message(chat_id=update.effective_chat.id, text="🧹 开始清理旧文件...")
@@ -328,7 +318,6 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 获取指令后参数
     args = context.args
-    user_id = update.effective_user.id
     
     # 如果是jm_id
     if len(context.args) >= 1 and args[0].isdigit():
@@ -355,7 +344,7 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     
                     # 继续处理发送逻辑
-                    await process_and_send_images(context, update.effective_chat.id, user_id, jm_id, "缓存内容", image_paths)
+                    await process_and_send_images(context, update.effective_chat.id, jm_id, "缓存内容", image_paths)
                     return
             
             await context.bot.send_message(chat_id=update.effective_chat.id,
@@ -414,7 +403,7 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # 记录下载到缓存
             folder_size = storage_manager.get_folder_size(download_dir)
-            storage_manager.record_download(jm_id, name, user_id, len(image_paths), folder_size)
+            storage_manager.record_download(jm_id, name, len(image_paths), folder_size)
             
             # 发送第一张图片作为预览
             with open(image_paths[0], 'rb') as f:
@@ -425,7 +414,7 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             
             # 处理和发送图片
-            await process_and_send_images(context, update.effective_chat.id, user_id, jm_id, name, image_paths)
+            await process_and_send_images(context, update.effective_chat.id, jm_id, name, image_paths)
 
         except MissingAlbumPhotoException as e:
             await context.bot.send_message(chat_id=update.effective_chat.id,
@@ -441,7 +430,7 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("请输入一个数字")
 
 
-async def process_and_send_images(context, chat_id, user_id, jm_id, name, image_paths):
+async def process_and_send_images(context, chat_id, jm_id, name, image_paths):
     """处理和发送图片的统一函数"""
     try:
         # 发送图片
@@ -504,7 +493,6 @@ if __name__ == '__main__':
     # 命令处理器
     start_handler = CommandHandler('start', start)
     bind_pica_handler = CommandHandler('bind_pica', bind_pica)
-    stats_handler = CommandHandler('stats', stats_command)
     cleanup_handler = CommandHandler('cleanup', cleanup_command)
     jm_search_handler = CommandHandler('jm', jm_search)
     echo_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), echo)
@@ -512,7 +500,6 @@ if __name__ == '__main__':
     # 注册处理器
     application.add_handler(start_handler)
     application.add_handler(bind_pica_handler)
-    application.add_handler(stats_handler)
     application.add_handler(cleanup_handler)
     application.add_handler(jm_search_handler)
     application.add_handler(echo_handler)

@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  hentai_bot:
+    build: .
+    container_name: hentai_bot
+    restart: unless-stopped
+    volumes:
+      # Persistent storage for downloads and cache
+      - ./data/download:/app/download
+      - ./data/option.yml:/app/option.yml
+    environment:
+      # Required: Telegram Bot Token
+      BOT_TOKEN: "${BOT_TOKEN:-}"
+      
+      # JM Comic Client Settings
+      JM_RETRY_TIMES: "${JM_RETRY_TIMES:-3}"
+      JM_TIMEOUT: "${JM_TIMEOUT:-30}"
+      
+      # ZIP Archive Settings
+      ENABLE_ZIP_ARCHIVE: "${ENABLE_ZIP_ARCHIVE:-true}"
+      ZIP_THRESHOLD: "${ZIP_THRESHOLD:-5}"
+      
+      # Storage Management Settings
+      ENABLE_STORAGE_MANAGEMENT: "${ENABLE_STORAGE_MANAGEMENT:-true}"
+      MAX_STORAGE_SIZE_GB: "${MAX_STORAGE_SIZE_GB:-2.0}"
+      KEEP_DAYS: "${KEEP_DAYS:-7}"
+      CLEANUP_INTERVAL_HOURS: "${CLEANUP_INTERVAL_HOURS:-6}"
+      CACHE_DB_PATH: "${CACHE_DB_PATH:-download/cache.json}"
+      
+      # Download Progress Settings
+      SHOW_DOWNLOAD_PROGRESS: "${SHOW_DOWNLOAD_PROGRESS:-true}"
+      PROGRESS_UPDATE_INTERVAL: "${PROGRESS_UPDATE_INTERVAL:-5}"

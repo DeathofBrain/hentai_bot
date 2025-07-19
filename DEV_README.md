@@ -32,59 +32,86 @@
 - **Duplicate Prevention**: Avoids downloading the same content multiple times
 - **Cache Status**: Real-time cache hit notifications
 
-#### 📊 User Statistics & Analytics
-- **Download Tracking**: Comprehensive download history and statistics
-- **User Metrics**: Track total downloads, images, and activity
+#### 🔗 Simple Cache Tracking
+- **Download History**: Basic cache tracking using JSON files
 - **Storage Insights**: Real-time storage usage and system status
-- **Historical Data**: SQLite database for persistent statistics
+- **Access Tracking**: Updates file access times for intelligent cleanup
 
-#### 🔧 Advanced Configuration
-- `ENABLE_STORAGE_MANAGEMENT`: Enable/disable automatic storage management
-- `MAX_STORAGE_SIZE_GB`: Maximum storage before cleanup (default: 2GB)
-- `KEEP_DAYS`: File retention period (default: 7 days)
-- `CLEANUP_INTERVAL_HOURS`: Background cleanup frequency (default: 6 hours)
-- `ENABLE_ZIP_ARCHIVE`: Enable/disable ZIP archive functionality
-- `ZIP_THRESHOLD`: Threshold for creating ZIP archives (default: 5 images)
-- `SHOW_DOWNLOAD_PROGRESS`: Enable/disable download progress indicators
+#### 🔧 Environment Variables Configuration
+All settings are now configurable via environment variables:
 
-#### 🤖 New Commands
-- `/stats` - View personal statistics and system storage status
+**Bot Settings:**
+- `BOT_TOKEN`: Telegram bot token (required)
+
+**JM Comic Client:**
+- `JM_RETRY_TIMES`: Download retry attempts (default: 3)
+- `JM_TIMEOUT`: Request timeout in seconds (default: 30)
+
+**ZIP Archive:**
+- `ENABLE_ZIP_ARCHIVE`: Enable ZIP archives (default: true)
+- `ZIP_THRESHOLD`: Images threshold for ZIP creation (default: 5)
+
+**Storage Management:**
+- `ENABLE_STORAGE_MANAGEMENT`: Enable auto cleanup (default: true)
+- `MAX_STORAGE_SIZE_GB`: Storage limit in GB (default: 2.0)
+- `KEEP_DAYS`: File retention period (default: 7)
+- `CLEANUP_INTERVAL_HOURS`: Cleanup frequency (default: 6)
+- `CACHE_DB_PATH`: Cache file path (default: download/cache.json)
+
+**Download Progress:**
+- `SHOW_DOWNLOAD_PROGRESS`: Show progress indicators (default: true)
+- `PROGRESS_UPDATE_INTERVAL`: Progress update frequency (default: 5)
+
+#### 🤖 Available Commands
+- `/start` - Welcome message
 - `/cleanup` - Manually trigger storage cleanup
-- `/start` - Enhanced welcome with user statistics
+- `/jm <id>` - Download manga by ID
 
-## Testing with Docker
+## Docker Deployment
 
-### Using the Dev Docker Image
+### Using Docker Compose (Recommended)
+
+Create a `.env` file from the example:
+```bash
+cp .env.example .env
+# Edit .env with your bot token and preferred settings
+```
+
+Run with docker-compose:
+```bash
+docker-compose up -d
+```
+
+### Manual Docker Run
 
 ```bash
 # Pull the dev version
 docker pull ghcr.io/deathofbrain/hentai_bot:dev
 
-# Run with your configuration
+# Run with environment variables
 docker run -d \
   --name hentai_bot_dev \
-  -v $(pwd)/option.yml:/app/option.yml \
-  -v $(pwd)/download:/app/download \
+  -e BOT_TOKEN="your_bot_token_here" \
+  -e MAX_STORAGE_SIZE_GB=2.0 \
+  -e KEEP_DAYS=7 \
+  -v $(pwd)/data/download:/app/download \
+  -v $(pwd)/data/option.yml:/app/option.yml \
   ghcr.io/deathofbrain/hentai_bot:dev
 ```
 
-### Configuration Notes
+### Environment Variables Setup
 
-1. **Storage Management**: 
-   - Automatic storage management is enabled by default
-   - Default storage limit: 2GB, retention period: 7 days
-   - Background cleanup runs every 6 hours
-   - You can disable by setting `ENABLE_STORAGE_MANAGEMENT = False`
+1. **Required Variables**: 
+   - `BOT_TOKEN`: Your Telegram bot token (required)
 
-2. **ZIP Archive Configuration**: 
-   - ZIP archive functionality is enabled by default
-   - Archives are created for image sets with more than 5 images
-   - You can disable by setting `ENABLE_ZIP_ARCHIVE = False`
+2. **Optional Configuration**: 
+   - All other settings have sensible defaults
+   - Override any setting using environment variables
+   - See complete list in `.env.example`
 
-3. **Cache System**:
-   - Automatically detects and uses cached content
-   - Updates access times for intelligent retention
-   - SQLite database stores download history and statistics
+3. **Volume Mounts**:
+   - `/app/download`: Persistent storage for downloads and cache
+   - `/app/option.yml`: JM Comic client configuration
 
 ### Testing Checklist
 
@@ -101,21 +128,27 @@ docker run -d \
 - [ ] Test cache miss for new content
 
 #### Storage Management
-- [ ] Test `/stats` command - should show user and system statistics
 - [ ] Test `/cleanup` command - should trigger manual cleanup
 - [ ] Verify automatic cleanup after configured intervals
 - [ ] Test storage limit enforcement
+- [ ] Check cache file persistence
+
+#### Environment Variables
+- [ ] Test with different `BOT_TOKEN` values
+- [ ] Verify storage settings take effect
+- [ ] Test ZIP archive configuration changes
+- [ ] Check download progress settings
 
 #### User Experience
-- [ ] Test enhanced `/start` command with statistics
+- [ ] Test `/start` command
 - [ ] Verify progress messages during downloads
 - [ ] Check error handling and user-friendly messages
-- [ ] Test database persistence across restarts
+- [ ] Test container restart behavior
 
 ### Known Limitations
 
 - ZIP archives are subject to Telegram's 50MB file size limit
-- SQLite database requires file system persistence for statistics
+- Cache tracking uses JSON files for simplicity
 - Background cleanup requires continuous operation
 - Storage management is based on file system operations
 
