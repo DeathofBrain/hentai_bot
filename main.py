@@ -73,8 +73,8 @@ SHOW_DOWNLOAD_PROGRESS = get_env_bool('SHOW_DOWNLOAD_PROGRESS', True)
 PROGRESS_UPDATE_INTERVAL = get_env_int('PROGRESS_UPDATE_INTERVAL', 5)
 
 # JM客户端创建
-def create_jm_client():
-    """创建JM客户端，使用内置配置文件"""
+def create_jm_option():
+    """创建JM配置，用于下载操作"""
     try:
         # 首先尝试使用内置的option.yml
         if os.path.exists('./option.yml') and os.path.isfile('./option.yml'):
@@ -83,12 +83,12 @@ def create_jm_client():
             option.client.retry_times = JM_RETRY_TIMES
             option.client.timeout = JM_TIMEOUT
             print("✅ 使用内置配置文件: ./option.yml")
-            return option.new_jm_client()
+            return option
     except Exception as e:
         print(f"⚠️ 无法读取内置配置文件: {e}")
     
     # 如果配置文件失败，使用代码创建默认配置
-    print("ℹ️ 使用默认配置创建客户端")
+    print("ℹ️ 使用默认配置创建选项")
     try:
         # 创建默认配置
         option = jmcomic.create_option(
@@ -100,16 +100,18 @@ def create_jm_client():
         )
         option.client.retry_times = JM_RETRY_TIMES
         option.client.timeout = JM_TIMEOUT
-        return option.new_jm_client()
+        return option
     except Exception as e:
-        print(f"❌ 创建默认客户端失败: {e}")
+        print(f"❌ 创建默认配置失败: {e}")
         # 最后的兜底方案
         option = jmcomic.create_option()
         option.client.retry_times = JM_RETRY_TIMES
         option.client.timeout = JM_TIMEOUT
-        return option.new_jm_client()
+        return option
 
-client = create_jm_client()
+# 创建全局配置和客户端
+jm_option = create_jm_option()
+client = jm_option.new_jm_client()
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -414,8 +416,8 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text="📊 开始下载..."
                     )
                 
-                # 直接下载，依赖JM客户端的内置重试机制
-                client.download_album(jm_id)
+                # 使用全局函数下载，传入配置选项
+                download_album(jm_id, jm_option)
                 download_success = True
                 
             except Exception as e:
