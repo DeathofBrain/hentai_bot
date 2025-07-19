@@ -17,8 +17,8 @@ services:
       BOT_TOKEN: "${BOT_TOKEN:-}"
       
       # JM Comic Client Settings
-      JM_RETRY_TIMES: "${JM_RETRY_TIMES:-3}"
-      JM_TIMEOUT: "${JM_TIMEOUT:-30}"
+      JM_RETRY_TIMES: "${JM_RETRY_TIMES:-2}"
+      JM_TIMEOUT: "${JM_TIMEOUT:-15}"
       
       # ZIP Archive Settings
       ENABLE_ZIP_ARCHIVE: "${ENABLE_ZIP_ARCHIVE:-true}"

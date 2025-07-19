@@ -54,8 +54,8 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required")
 
 # JM客户端配置
-JM_RETRY_TIMES = get_env_int('JM_RETRY_TIMES', 3)
-JM_TIMEOUT = get_env_int('JM_TIMEOUT', 30)
+JM_RETRY_TIMES = get_env_int('JM_RETRY_TIMES', 2)  # 减少重试次数
+JM_TIMEOUT = get_env_int('JM_TIMEOUT', 15)  # 减少超时时间
 
 # 压缩包配置
 ENABLE_ZIP_ARCHIVE = get_env_bool('ENABLE_ZIP_ARCHIVE', True)
@@ -404,33 +404,39 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=update.effective_chat.id,
                                            text=f'开始下载《{name}》，请稍后...')
             
-            # 下载with重试逻辑和进度显示
-            max_retries = 3
+            # 下载逻辑（使用JM客户端内置重试）
             download_success = False
             
-            for attempt in range(max_retries):
-                try:
-                    if SHOW_DOWNLOAD_PROGRESS and attempt == 0:
-                        progress_msg = await context.bot.send_message(
-                            chat_id=update.effective_chat.id,
-                            text="📊 下载进度: 0%"
-                        )
-                    
-                    download_album(jm_id, option)
-                    download_success = True
-                    break
-                    
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        raise e
-                    await context.bot.send_message(chat_id=update.effective_chat.id,
-                                                   text=f'下载出现问题，正在重试 ({attempt + 1}/{max_retries})...')
-                    time.sleep(2)
-            
-            if not download_success:
-                await context.bot.send_message(chat_id=update.effective_chat.id,
-                                               text='❌ 下载失败，已达到最大重试次数')
+            try:
+                if SHOW_DOWNLOAD_PROGRESS:
+                    progress_msg = await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="📊 开始下载..."
+                    )
+                
+                # 直接下载，依赖JM客户端的内置重试机制
+                client.download_album(jm_id)
+                download_success = True
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="⚠️ 网络连接超时，请稍后重试或检查网络状况"
+                    )
+                elif "not found" in error_msg.lower() or "404" in error_msg:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="❌ 内容不存在或已被删除"
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=f"❌ 下载失败: {error_msg}"
+                    )
                 return
+            
             
             # 检查下载结果
             download_dir = f'download/{jm_id}'

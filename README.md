@@ -72,8 +72,8 @@ docker run -d \
 - `BOT_TOKEN`: Telegram 机器人 Token (**必需**)
 
 #### JM 客户端设置
-- `JM_RETRY_TIMES`: 下载重试次数 (默认: 3)
-- `JM_TIMEOUT`: 请求超时时间，秒 (默认: 30)
+- `JM_RETRY_TIMES`: 下载重试次数 (默认: 2)
+- `JM_TIMEOUT`: 请求超时时间，秒 (默认: 15)
 
 #### 压缩包设置
 - `ENABLE_ZIP_ARCHIVE`: 启用压缩包功能 (默认: true)
