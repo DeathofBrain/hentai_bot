@@ -71,13 +71,19 @@ All settings are now configurable via environment variables:
 
 ### Using Docker Compose (Recommended)
 
-Create a `.env` file from the example:
+1. **Setup configuration files:**
 ```bash
+# Create environment variables file
 cp .env.example .env
-# Edit .env with your bot token and preferred settings
+# Edit .env with your bot token and settings
+
+# Create data directory and config
+mkdir -p data
+cp option.yml.example data/option.yml
+# Edit data/option.yml if needed for JM Comic settings
 ```
 
-Run with docker-compose:
+2. **Run with docker-compose:**
 ```bash
 docker-compose up -d
 ```

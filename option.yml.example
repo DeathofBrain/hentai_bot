@@ -1,0 +1,12 @@
+dir_rule:
+  base_dir: ./download/
+  rule: Bd / Pid
+download:
+  image:
+    suffix: .jpg # 图片格式设置
+#plugins:
+#  after_album:
+#    - plugin: long_img
+#      kwargs:
+#        img_dir: ./download/
+#        filename_rule: Aname # 长图命名规则，同上

@@ -13,6 +13,18 @@ from jmcomic import *
 from telegram import Update, InputMediaPhoto
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, filters, MessageHandler
 
+# 尝试加载.env文件
+def load_env_file():
+    """加载.env文件中的环境变量"""
+    env_file = '.env'
+    if os.path.exists(env_file):
+        with open(env_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ[key.strip()] = value.strip()
+
 # 环境变量配置
 def get_env_bool(key, default=False):
     """获取布尔型环境变量"""
@@ -32,6 +44,9 @@ def get_env_float(key, default=0.0):
         return float(os.getenv(key, str(default)))
     except ValueError:
         return default
+
+# 加载环境变量文件
+load_env_file()
 
 # Bot配置
 BOT_TOKEN = os.getenv('BOT_TOKEN')

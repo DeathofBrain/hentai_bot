@@ -6,9 +6,12 @@ services:
     container_name: hentai_bot
     restart: unless-stopped
     volumes:
-      # Persistent storage for downloads and cache
+      # 持久化存储下载和缓存
       - ./data/download:/app/download
+      # JM Comic配置文件
       - ./data/option.yml:/app/option.yml
+      # 环境变量文件映射
+      - ./.env:/app/.env
     environment:
       # Required: Telegram Bot Token
       BOT_TOKEN: "${BOT_TOKEN:-}"
