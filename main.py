@@ -531,7 +531,6 @@ async def episode_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
         
 
-# From DeathofBrain: 建议以20为一组，由用户触发后续发送（需要id:caches字典存储支持，后续优化方向）
 async def process_and_send_images(context, chat_id, jm_id, name, image_paths):
     """处理和发送图片的统一函数"""
     try:
@@ -552,43 +551,43 @@ async def process_and_send_images(context, chat_id, jm_id, name, image_paths):
         
         await send_images_traditional(context, chat_id, image_paths)
         
-        # 如果图片数量超过阈值，创建并发送压缩包
-        if ENABLE_ZIP_ARCHIVE and len(image_paths) > ZIP_THRESHOLD:
-            await context.bot.send_message(chat_id=chat_id,
-                                         text='📦 正在创建压缩包...')
+        # # 如果图片数量超过阈值，创建并发送压缩包
+        # if ENABLE_ZIP_ARCHIVE and len(image_paths) > ZIP_THRESHOLD:
+        #     await context.bot.send_message(chat_id=chat_id,
+        #                                  text='📦 正在创建压缩包...')
             
-            if name:
-                zip_path = create_zip_archive(image_paths, f"{name}_{jm_id}")
-            else:
-                zip_path = create_zip_archive(image_paths, f"{jm_id}")
-            if zip_path:
-                file_size = get_file_size_mb(zip_path)
+        #     if name:
+        #         zip_path = create_zip_archive(image_paths, f"{name}_{jm_id}")
+        #     else:
+        #         zip_path = create_zip_archive(image_paths, f"{jm_id}")
+        #     if zip_path:
+        #         file_size = get_file_size_mb(zip_path)
                 
-                # Telegram文件大小限制是50MB
-                if file_size <= 50:
-                    try:
-                        with open(zip_path, 'rb') as zip_file:
-                            await context.bot.send_document(
-                                chat_id=chat_id,
-                                document=zip_file,
-                                filename=f"{name}.zip",
-                                caption=f"📦 完整压缩包\n📊 大小: {file_size:.1f}MB\n📷 包含: {len(image_paths)}张图片"
-                            )
+        #         # Telegram文件大小限制是50MB
+        #         if file_size <= 50:
+        #             try:
+        #                 with open(zip_path, 'rb') as zip_file:
+        #                     await context.bot.send_document(
+        #                         chat_id=chat_id,
+        #                         document=zip_file,
+        #                         filename=f"{name}.zip",
+        #                         caption=f"📦 完整压缩包\n📊 大小: {file_size:.1f}MB\n📷 包含: {len(image_paths)}张图片"
+        #                     )
                         
-                        # 发送完成后删除压缩包
-                        os.remove(zip_path)
+        #                 # 发送完成后删除压缩包
+        #                 os.remove(zip_path)
                         
-                    except Exception as e:
-                        await context.bot.send_message(chat_id=chat_id,
-                                                     text=f'❌ 发送压缩包失败: {str(e)}')
-                else:
-                    await context.bot.send_message(chat_id=chat_id,
-                                                 text=f'❌ 压缩包太大({file_size:.1f}MB)，超过Telegram 50MB限制')
-                    # 删除过大的压缩包
-                    os.remove(zip_path)
-            else:
-                await context.bot.send_message(chat_id=chat_id,
-                                             text='❌ 创建压缩包失败')
+        #             except Exception as e:
+        #                 await context.bot.send_message(chat_id=chat_id,
+        #                                              text=f'❌ 发送压缩包失败: {str(e)}')
+        #         else:
+        #             await context.bot.send_message(chat_id=chat_id,
+        #                                          text=f'❌ 压缩包太大({file_size:.1f}MB)，超过Telegram 50MB限制')
+        #             # 删除过大的压缩包
+        #             os.remove(zip_path)
+        #     else:
+        #         await context.bot.send_message(chat_id=chat_id,
+        #                                      text='❌ 创建压缩包失败')
         
         # 发送完成提示
         await context.bot.send_message(
@@ -597,6 +596,7 @@ async def process_and_send_images(context, chat_id, jm_id, name, image_paths):
         )
         
     except Exception as e:
+        print(e)
         await context.bot.send_message(chat_id=chat_id,
                                      text=f'处理图片时发生错误: {str(e)}')
 
