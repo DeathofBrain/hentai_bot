@@ -1,4 +1,5 @@
 import glob
+import math
 import logging
 import re
 import os
@@ -10,8 +11,8 @@ import threading
 import shutil
 import jmcomic
 from jmcomic import *
-from telegram import Update, InputMediaPhoto
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, filters, MessageHandler
+from telegram import *
+from telegram.ext import *
 
 # 尝试加载.env文件
 def load_env_file():
@@ -119,6 +120,7 @@ logging.basicConfig(
 )
 
 
+# From DeathofBrain: dev分支要不弄个beta bot？存储管理器有做单元测试吗？
 class StorageManager:
     """存储管理器 - 简化版，仅负责缓存和清理"""
     
@@ -363,7 +365,27 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"❌ 清理失败: {str(e)}"
         )
 
+# TODO: 抽象化下载逻辑
+# 下载指定章节本子 返回值：图片路径数组
+def jm_download(jm_id, jm_option):
+    download_dir = f'download/{jm_id}'
+    is_cached = storage_manager.is_cached(jm_id)
+    if not is_cached:
+        # 如果未缓存，下载本子
+        download_album(jm_id, jm_option)
+        # 记录下载到缓存
+        folder_size = storage_manager.get_folder_size(download_dir)
+        storage_manager.record_download(jm_id, jm_option.album_name, len(image_paths), folder_size)
+        
+    image_paths = glob.glob(f'{download_dir}/*.jpg')
+    image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x.split('/')[-1]).group()))
+    return image_paths
 
+'''
+函数结果：
+自成一章：直接下载并发送，无需回调
+单本多章节：输出章节列表，用户选择后下载指定章节，下载与发送在回调中实现
+'''
 async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 获取指令后参数
     args = context.args
@@ -372,119 +394,144 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) >= 1 and args[0].isdigit():
         try:
             jm_id = args[0]
-            
-            # 检查是否已缓存
-            if storage_manager.is_cached(jm_id):
-                await context.bot.send_message(chat_id=update.effective_chat.id,
-                                               text=f'🎯 发现缓存，快速加载中...')
-                
-                # 获取缓存的信息
-                download_dir = f'download/{jm_id}'
-                image_paths = glob.glob(f'{download_dir}/*.jpg')
-                image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x.split('/')[-1]).group()))
-                
-                if image_paths:
-                    # 发送第一张图片作为预览
-                    with open(image_paths[0], 'rb') as f:
-                        await context.bot.send_photo(
-                            chat_id=update.effective_chat.id,
-                            photo=f,
-                            caption=f"📋 缓存内容 (共{len(image_paths)}张)"
-                        )
-                    
-                    # 继续处理发送逻辑
-                    await process_and_send_images(context, update.effective_chat.id, jm_id, "缓存内容", image_paths)
-                    return
-            
+            # jm_photo_id = ''
+            # 逻辑：先获取本子类，再输出标题，章节内容，最后根据按钮回调发送相关章节
+            # 请求本子实体类
             await context.bot.send_message(chat_id=update.effective_chat.id,
                                            text=f'正在获取本子信息...')
             
-            # 请求本子实体类
             album: JmAlbumDetail = client.get_album_detail(jm_id)
-            name = album.name
+            if not album.is_album():
+                await context.bot.send_message(chat_id=update.effective_chat.id,
+                                               text='❌ 该ID不是一个有效的本子')
+                return
             
+            name = album.name
             await context.bot.send_message(chat_id=update.effective_chat.id,
                                            text=f'开始下载《{name}》，请稍后...')
+            image_paths = []
+            # 检查是否为单章节
+            # 若是，直接下载
+            if len(album.episode_list) == 1:
+                try:
+                    image_paths = jm_download(jm_id, jm_option)
+                    # 检查下载结果
+                    if not image_paths:
+                        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                                       text='❌ 下载失败，未找到图片文件')
+                        return
+                    # 处理和发送图片
+                    await process_and_send_images(context, update.effective_chat.id, jm_id, name, image_paths)
+                    
+                except Exception as e:
+                    await context.bot.send_message(chat_id=update.effective_chat.id,
+                                                   text=f'❌ 下载失败: {str(e)}')
+                    return
+            # 否则，输出章节按钮列表（20个为一组）
+            else:
+                await episode_button_send(update, context, album)
             
-            # 下载逻辑（使用JM客户端内置重试）
-            download_success = False
-            
-            try:
-                if SHOW_DOWNLOAD_PROGRESS:
-                    progress_msg = await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="📊 开始下载..."
-                    )
-                
-                # 使用全局函数下载，传入配置选项
-                download_album(jm_id, jm_option)
-                download_success = True
-                
-            except Exception as e:
-                error_msg = str(e)
-                if "timeout" in error_msg.lower() or "connection" in error_msg.lower():
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="⚠️ 网络连接超时，请稍后重试或检查网络状况"
-                    )
-                elif "not found" in error_msg.lower() or "404" in error_msg:
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="❌ 内容不存在或已被删除"
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=f"❌ 下载失败: {error_msg}"
-                    )
-                return
-            
-            
-            # 检查下载结果
-            download_dir = f'download/{jm_id}'
-            if not os.path.exists(download_dir):
-                await context.bot.send_message(chat_id=update.effective_chat.id,
-                                               text='❌ 下载失败，目录不存在')
-                return
-            
-            # 获取所有图片文件并排序
-            image_paths = glob.glob(f'{download_dir}/*.jpg')
-            image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x.split('/')[-1]).group()))
-            
-            if not image_paths:
-                await context.bot.send_message(chat_id=update.effective_chat.id,
-                                               text='❌ 下载失败，未找到图片文件')
-                return
-            
-            # 记录下载到缓存
-            folder_size = storage_manager.get_folder_size(download_dir)
-            storage_manager.record_download(jm_id, name, len(image_paths), folder_size)
-            
-            # 发送第一张图片作为预览
-            with open(image_paths[0], 'rb') as f:
-                await context.bot.send_photo(
-                    chat_id=update.effective_chat.id,
-                    photo=f,
-                    caption=f"📋 {name} (共{len(image_paths)}张)"
-                )
-            
-            # 处理和发送图片
-            await process_and_send_images(context, update.effective_chat.id, jm_id, name, image_paths)
-
-        except MissingAlbumPhotoException as e:
-            await context.bot.send_message(chat_id=update.effective_chat.id,
-                                           text=f'id={e.error_jmid}的本子不存在')
         except JmcomicException as e:
-            # 捕获所有异常，用作兜底
             await context.bot.send_message(chat_id=update.effective_chat.id,
                                            text=f'jmcomic遇到异常: {e}')
+        # 捕获所有异常，用作兜底
+        # 别忘了保存log
         except Exception as e:
             await context.bot.send_message(chat_id=update.effective_chat.id,
                                            text=f'发生错误: {str(e)}')
+    # TODO: 本子名称搜索实现
     else:
         await update.message.reply_text("请输入一个数字")
 
+# 暂使用全局变量，后续通过类来管理
+episode_buttons = []
+index = 0
+max_index = 0
+nav_buttons = [
+    InlineKeyboardButton(text="首页", callback_data="first"),
+    InlineKeyboardButton(text="上一页", callback_data="prev"),
+    InlineKeyboardButton(text="下一页", callback_data="next"),
+    InlineKeyboardButton(text="末页", callback_data="last")
+]
 
+# 章节按钮发送
+async def episode_button_send(update: Update, context: ContextTypes.DEFAULT_TYPE, album: JmAlbumDetail):
+    global index, max_index, episode_buttons
+    # 初始化章节按钮列表
+    episode_buttons.clear()
+    index = 0
+    # 计算最大页数
+    max_index = math.ceil(len(album.episode_list) / 20)
+    for episode in album.episode_list:
+        episode_id, episode_name = episode[0], episode[1]
+        # 创建按钮
+        button = InlineKeyboardButton(text=f"{episode_name}", callback_data=episode_id)
+        episode_buttons.append(button)
+    # 取前二十个按钮，再加上导航按钮
+    buttons = episode_buttons[:20] + nav_buttons
+    # 分割按钮为n行四列
+    rows = [episode_buttons[i:i + 4] for i in range(0, len(episode_buttons[:20]), 4)]
+    rows.append(nav_buttons)  # 添加导航按钮作为最后一行
+    # N行四列排布
+    keyboards = InlineKeyboardMarkup(rows)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"本子《{album.title}》包含{len(album.episode_list)}个章节，请选择章节下载：",
+        reply_markup=keyboards
+    )
+    
+# 章节按钮回调
+async def episode_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()  # 确认回调
+    # 处理章节ID下载
+    jm_id = query.data
+    try:
+        image_paths = jm_download(jm_id, jm_option)
+        # 检查下载结果
+        if not image_paths:
+            await context.bot.send_message(chat_id=update.effective_chat.id,
+                                            text='❌ 下载失败，未找到图片文件')
+            return
+        # 处理和发送图片
+        await process_and_send_images(context, update.effective_chat.id, jm_id, None, image_paths)
+        
+    except Exception as e:
+        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                        text=f'❌ 下载失败: {str(e)}')
+        return
+            
+# 导航按钮回调
+async def episode_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()  # 确认回调
+    global index, max_index, episode_buttons
+    
+    if query.data == "first":
+        index = 0
+    elif query.data == "prev":
+        index = max(0, index - 1)
+    elif query.data == "next":
+        index = min(max_index - 1, index + 1)
+    elif query.data == "last":
+        index = max_index - 1
+    
+    # 更新按钮显示
+    start = index * 20
+    end = start + 20
+    buttons = episode_buttons[start:end]
+    
+    # 分割按钮为n行四列
+    rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
+    
+    # 添加导航按钮作为最后一行
+    rows.append(nav_buttons)
+    
+    # 更新消息
+    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+        
+
+# From DeathofBrain: 建议以20为一组，由用户触发后续发送（需要id:caches字典存储支持，后续优化方向）
 async def process_and_send_images(context, chat_id, jm_id, name, image_paths):
     """处理和发送图片的统一函数"""
     try:
@@ -492,8 +539,17 @@ async def process_and_send_images(context, chat_id, jm_id, name, image_paths):
         if len(image_paths) > 10:
             await context.bot.send_message(chat_id=chat_id,
                                          text=f'图片较多({len(image_paths)}张)，将分批发送...')
+        # 发送第一张图片作为预览
+        if name:
+            with open(image_paths[0], 'rb') as f:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=f,
+                    caption=f"📋 {name} (共{len(image_paths)}张)"
+                )
         
         # 发送所有图片
+        
         await send_images_traditional(context, chat_id, image_paths)
         
         # 如果图片数量超过阈值，创建并发送压缩包
@@ -501,7 +557,10 @@ async def process_and_send_images(context, chat_id, jm_id, name, image_paths):
             await context.bot.send_message(chat_id=chat_id,
                                          text='📦 正在创建压缩包...')
             
-            zip_path = create_zip_archive(image_paths, f"{name}_{jm_id}")
+            if name:
+                zip_path = create_zip_archive(image_paths, f"{name}_{jm_id}")
+            else:
+                zip_path = create_zip_archive(image_paths, f"{jm_id}")
             if zip_path:
                 file_size = get_file_size_mb(zip_path)
                 
@@ -558,6 +617,8 @@ if __name__ == '__main__':
     application.add_handler(cleanup_handler)
     application.add_handler(jm_search_handler)
     application.add_handler(echo_handler)
+    application.add_handler(CallbackQueryHandler(episode_button_callback, pattern=r'^\d+$'))  # 章节按钮回调
+    application.add_handler(CallbackQueryHandler(episode_nav_callback, pattern=r'^(first|prev|next|last)$'))  # 导航按钮回调
 
     print("🤖 Bot 启动中...")
     print(f"📁 存储管理: {'启用' if ENABLE_STORAGE_MANAGEMENT else '禁用'}")
