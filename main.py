@@ -463,7 +463,7 @@ async def episode_button_send(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 计算最大页数
     max_index = math.ceil(len(album.episode_list) / 20)
     for episode in album.episode_list:
-        episode_id, episode_name = episode[0], episode[2]
+        episode_id, episode_name = episode[0], episode[2] or episode[1]
         # 创建按钮
         button = InlineKeyboardButton(text=f"{episode_name}", callback_data=episode_id)
         episode_buttons.append(button)
