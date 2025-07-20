@@ -369,13 +369,13 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 下载指定章节本子 返回值：图片路径数组
 def jm_download(jm_id, jm_option):
     download_dir = f'download/{jm_id}'
-    is_cached = storage_manager.is_cached(jm_id)
-    if not is_cached:
+    # is_cached = storage_manager.is_cached(jm_id)
+    # if not is_cached:
         # 如果未缓存，下载本子
-        download_album(jm_id, jm_option)
-        # 记录下载到缓存
-        folder_size = storage_manager.get_folder_size(download_dir)
-        storage_manager.record_download(jm_id, jm_option.album_name, len(image_paths), folder_size)
+    download_photo(jm_id, jm_option)
+        # # 记录下载到缓存
+        # folder_size = storage_manager.get_folder_size(download_dir)
+        # storage_manager.record_download(jm_id, jm_option.album_name, len(image_paths), folder_size)
         
     image_paths = glob.glob(f'{download_dir}/*.jpg')
     image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x.split('/')[-1]).group()))
