@@ -9,6 +9,11 @@ import json
 import datetime
 import threading
 import shutil
+import asyncio
+import aiofiles
+import weakref
+from concurrent.futures import ThreadPoolExecutor
+import gc
 import jmcomic
 from jmcomic import *
 from telegram import *
@@ -57,6 +62,11 @@ if not BOT_TOKEN:
 # JM客户端配置
 JM_RETRY_TIMES = get_env_int('JM_RETRY_TIMES', 2)  # 减少重试次数
 JM_TIMEOUT = get_env_int('JM_TIMEOUT', 15)  # 减少超时时间
+
+# 并发控制配置
+MAX_CONCURRENT_DOWNLOADS = get_env_int('MAX_CONCURRENT_DOWNLOADS', 2)
+MAX_CONCURRENT_UPLOADS = get_env_int('MAX_CONCURRENT_UPLOADS', 3)
+THREAD_POOL_SIZE = get_env_int('THREAD_POOL_SIZE', 4)
 
 # 压缩包配置
 ENABLE_ZIP_ARCHIVE = get_env_bool('ENABLE_ZIP_ARCHIVE', True)
@@ -110,9 +120,32 @@ def create_jm_option():
         option.client.timeout = JM_TIMEOUT
         return option
 
-# 创建全局配置和客户端
+# 创建全局配置和线程池
 jm_option = create_jm_option()
-client = jm_option.new_jm_client()
+thread_pool = ThreadPoolExecutor(max_workers=THREAD_POOL_SIZE)
+download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
+
+# 客户端池管理
+class JMClientPool:
+    def __init__(self, max_size=5):
+        self.max_size = max_size
+        self.pool = []
+        self.lock = asyncio.Lock()
+    
+    async def get_client(self):
+        async with self.lock:
+            if self.pool:
+                return self.pool.pop()
+            else:
+                return jm_option.new_jm_client()
+    
+    async def return_client(self, client):
+        async with self.lock:
+            if len(self.pool) < self.max_size:
+                self.pool.append(client)
+
+client_pool = JMClientPool()
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -126,6 +159,7 @@ class StorageManager:
     
     def __init__(self):
         self.cache_file = CACHE_DB_PATH
+        self.cache_lock = asyncio.Lock()
         self.init_cache_tracking()
         self.start_cleanup_scheduler()
     
@@ -146,48 +180,52 @@ class StorageManager:
             with open(self.cache_file, 'w') as f:
                 json.dump({}, f)
     
-    def record_download(self, jm_id, name, file_count, folder_size):
+    async def record_download(self, jm_id, name, file_count, folder_size):
         """记录下载到缓存"""
         now = datetime.datetime.now().isoformat()
         
-        try:
-            with open(self.cache_file, 'r') as f:
-                cache_data = json.load(f)
-        except:
-            cache_data = {}
-        
-        cache_data[jm_id] = {
-            'name': name,
-            'download_time': now,
-            'access_time': now,
-            'file_count': file_count,
-            'folder_size_bytes': folder_size
-        }
-        
-        try:
-            with open(self.cache_file, 'w') as f:
-                json.dump(cache_data, f, indent=2)
-        except Exception as e:
-            print(f"缓存记录失败: {e}")
+        async with self.cache_lock:
+            try:
+                async with aiofiles.open(self.cache_file, 'r') as f:
+                    content = await f.read()
+                    cache_data = json.loads(content) if content else {}
+            except:
+                cache_data = {}
+            
+            cache_data[jm_id] = {
+                'name': name,
+                'download_time': now,
+                'access_time': now,
+                'file_count': file_count,
+                'folder_size_bytes': folder_size
+            }
+            
+            try:
+                async with aiofiles.open(self.cache_file, 'w') as f:
+                    await f.write(json.dumps(cache_data, indent=2))
+            except Exception as e:
+                print(f"缓存记录失败: {e}")
     
-    def is_cached(self, jm_id):
+    async def is_cached(self, jm_id):
         """检查是否已缓存"""
         download_path = f'download/{jm_id}'
         if not os.path.exists(download_path):
             return False
         
         # 更新访问时间
-        try:
-            with open(self.cache_file, 'r') as f:
-                cache_data = json.load(f)
-            
-            if jm_id in cache_data:
-                cache_data[jm_id]['access_time'] = datetime.datetime.now().isoformat()
+        async with self.cache_lock:
+            try:
+                async with aiofiles.open(self.cache_file, 'r') as f:
+                    content = await f.read()
+                    cache_data = json.loads(content) if content else {}
                 
-                with open(self.cache_file, 'w') as f:
-                    json.dump(cache_data, f, indent=2)
-        except Exception as e:
-            print(f"更新访问时间失败: {e}")
+                if jm_id in cache_data:
+                    cache_data[jm_id]['access_time'] = datetime.datetime.now().isoformat()
+                    
+                    async with aiofiles.open(self.cache_file, 'w') as f:
+                        await f.write(json.dumps(cache_data, indent=2))
+            except Exception as e:
+                print(f"更新访问时间失败: {e}")
         
         return True
     
@@ -278,6 +316,8 @@ class StorageManager:
             while True:
                 time.sleep(CLEANUP_INTERVAL_HOURS * 3600)
                 self.cleanup_old_files()
+                # 清理过期用户会话
+                cleanup_expired_sessions()
         
         if ENABLE_STORAGE_MANAGEMENT:
             cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
@@ -326,18 +366,51 @@ def get_file_size_mb(file_path):
         return 0
 
 
-async def send_images_traditional(context, chat_id, image_paths):
-    """传统方式发送图片，10张打包"""
+async def send_images_optimized(context, chat_id, image_paths):
+    """优化的图片发送函数"""
     batch_size = 10
+    
+    async def send_batch(batch_paths):
+        """发送单个批次"""
+        async with upload_semaphore:
+            media_group = []
+            file_handles = []
+            
+            try:
+                for path in batch_paths:
+                    async with aiofiles.open(path, "rb") as f:
+                        content = await f.read()
+                        media_group.append(InputMediaPhoto(media=content))
+                        # 及时释放文件内容
+                        del content
+                
+                if media_group:
+                    await context.bot.send_media_group(chat_id=chat_id, media=media_group)
+                    # 强制垃圾回收
+                    gc.collect()
+                    
+            except Exception as e:
+                print(f"发送图片批次失败: {e}")
+                raise
+            finally:
+                # 清理内存
+                del media_group
+                gc.collect()
+    
+    # 并发发送多个批次
+    tasks = []
     for i in range(0, len(image_paths), batch_size):
-        media_group = []
-        
-        for path in image_paths[i:i + batch_size]:
-            with open(path, "rb") as f:
-                media_group.append(InputMediaPhoto(media=f.read()))
-        
-        if media_group:
-            await context.bot.send_media_group(chat_id=chat_id, media=media_group)
+        batch = image_paths[i:i + batch_size]
+        tasks.append(send_batch(batch))
+    
+    # 限制并发数量，避免过多并发
+    semaphore = asyncio.Semaphore(2)
+    
+    async def limited_send(task):
+        async with semaphore:
+            await task
+    
+    await asyncio.gather(*[limited_send(task) for task in tasks])
 
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -365,20 +438,42 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"❌ 清理失败: {str(e)}"
         )
 
-# TODO: 抽象化下载逻辑
-# 下载指定章节本子 返回值：图片路径数组
-def jm_download(jm_id, jm_option):
+# 优化的异步下载函数
+async def jm_download_async(jm_id, name=None):
+    """异步下载函数优化"""
     download_dir = f'download/{jm_id}'
-    # is_cached = storage_manager.is_cached(jm_id)
-    # if not is_cached:
-        # 如果未缓存，下载本子
-    download_photo(jm_id, jm_option)
-        # # 记录下载到缓存
-        # folder_size = storage_manager.get_folder_size(download_dir)
-        # storage_manager.record_download(jm_id, jm_option.album_name, len(image_paths), folder_size)
+    
+    # 检查缓存
+    is_cached = await storage_manager.is_cached(jm_id)
+    if is_cached:
+        image_paths = glob.glob(f'{download_dir}/*.jpg')
+        if image_paths:
+            image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x.split('/')[-1]).group()))
+            return image_paths
+    
+    # 使用信号量控制并发下载
+    async with download_semaphore:
+        # 在线程池中执行下载
+        loop = asyncio.get_event_loop()
+        client = await client_pool.get_client()
         
+        try:
+            await loop.run_in_executor(
+                thread_pool,
+                lambda: download_photo(jm_id, jm_option)
+            )
+        finally:
+            await client_pool.return_client(client)
+    
+    # 获取下载的图片
     image_paths = glob.glob(f'{download_dir}/*.jpg')
-    image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x.split('/')[-1]).group()))
+    if image_paths:
+        image_paths.sort(key=lambda x: int(re.search(r'(\d+)', x.split('/')[-1]).group()))
+        
+        # 记录到缓存
+        folder_size = storage_manager.get_folder_size(download_dir)
+        await storage_manager.record_download(jm_id, name or jm_id, len(image_paths), folder_size)
+    
     return image_paths
 
 '''
@@ -400,7 +495,12 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=update.effective_chat.id,
                                            text=f'正在获取本子信息...')
             
-            album: JmAlbumDetail = client.get_album_detail(jm_id)
+            # 从客户端池获取客户端
+            client = await client_pool.get_client()
+            try:
+                album: JmAlbumDetail = client.get_album_detail(jm_id)
+            finally:
+                await client_pool.return_client(client)
             if not album.is_album():
                 await context.bot.send_message(chat_id=update.effective_chat.id,
                                                text='❌ 该ID不是一个有效的本子')
@@ -414,7 +514,7 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 若是，直接下载
             if len(album.episode_list) == 1:
                 try:
-                    image_paths = jm_download(jm_id, jm_option)
+                    image_paths = await jm_download_async(jm_id, name)
                     # 检查下载结果
                     if not image_paths:
                         await context.bot.send_message(chat_id=update.effective_chat.id,
@@ -425,7 +525,7 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                 except Exception as e:
                     await context.bot.send_message(chat_id=update.effective_chat.id,
-                                                   text=f'❌ 下载失败: {str(e)}')
+                                                   text=f'❌ 下载失赅: {str(e)}')
                     return
             # 否则，输出章节按钮列表（20个为一组）
             else:
@@ -443,10 +543,41 @@ async def jm_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("请输入一个数字")
 
-# 暂使用全局变量，后续通过类来管理
-episode_buttons = []
-index = 0
-max_index = 0
+# 用户会话管理
+user_sessions = {}
+
+class UserSession:
+    def __init__(self, user_id):
+        self.user_id = user_id
+        self.episode_buttons = []
+        self.index = 0
+        self.max_index = 0
+        self.album_info = None
+        self.last_activity = time.time()
+    
+    def update_activity(self):
+        self.last_activity = time.time()
+
+# 清理过期会话
+def cleanup_expired_sessions():
+    current_time = time.time()
+    expired_users = []
+    for user_id, session in user_sessions.items():
+        if current_time - session.last_activity > 3600:  # 1小时过期
+            expired_users.append(user_id)
+    
+    for user_id in expired_users:
+        del user_sessions[user_id]
+
+# 获取或创建用户会话
+def get_user_session(user_id):
+    if user_id not in user_sessions:
+        user_sessions[user_id] = UserSession(user_id)
+    
+    session = user_sessions[user_id]
+    session.update_activity()
+    return session
+
 nav_buttons = [
     InlineKeyboardButton(text="首页", callback_data="first"),
     InlineKeyboardButton(text="上一页", callback_data="prev"),
@@ -456,22 +587,36 @@ nav_buttons = [
 
 # 章节按钮发送
 async def episode_button_send(update: Update, context: ContextTypes.DEFAULT_TYPE, album: JmAlbumDetail):
-    global index, max_index, episode_buttons
-    # 初始化章节按钮列表
-    episode_buttons.clear()
-    index = 0
+    user_id = update.effective_user.id
+    session = get_user_session(user_id)
+    
+    # 初始化用户会话章节信息
+    session.episode_buttons.clear()
+    session.index = 0
+    session.album_info = album
     # 计算最大页数
-    max_index = math.ceil(len(album.episode_list) / 20)
+    session.max_index = math.ceil(len(album.episode_list) / 20)
+    
     for episode in album.episode_list:
         episode_id, episode_name = episode[0], episode[2] or episode[1]
-        # 创建按钮
-        button = InlineKeyboardButton(text=f"{episode_name}", callback_data=episode_id)
-        episode_buttons.append(button)
-    # 取前二十个按钮，再加上导航按钮
-    buttons = episode_buttons[:20] + nav_buttons
+        # 创建按钮，在callback_data中包含用户ID
+        button = InlineKeyboardButton(text=f"{episode_name}", callback_data=f"ep_{user_id}_{episode_id}")
+        session.episode_buttons.append(button)
+    
+    # 取前二十个按钮
+    current_buttons = session.episode_buttons[:20]
     # 分割按钮为n行四列
-    rows = [episode_buttons[i:i + 4] for i in range(0, len(episode_buttons[:20]), 4)]
-    rows.append(nav_buttons)  # 添加导航按钮作为最后一行
+    rows = [current_buttons[i:i + 4] for i in range(0, len(current_buttons), 4)]
+    
+    # 为导航按钮添加用户ID
+    user_nav_buttons = [
+        InlineKeyboardButton(text="首页", callback_data=f"nav_{user_id}_first"),
+        InlineKeyboardButton(text="上一页", callback_data=f"nav_{user_id}_prev"),
+        InlineKeyboardButton(text="下一页", callback_data=f"nav_{user_id}_next"),
+        InlineKeyboardButton(text="末页", callback_data=f"nav_{user_id}_last")
+    ]
+    rows.append(user_nav_buttons)  # 添加导航按钮作为最后一行
+    
     # N行四列排布
     keyboards = InlineKeyboardMarkup(rows)
     await context.bot.send_message(
@@ -484,15 +629,33 @@ async def episode_button_send(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def episode_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()  # 确认回调
-    # 处理章节ID下载
-    jm_id = query.data
+    
+    # 解析callback_data
     try:
-        image_paths = jm_download(jm_id, jm_option)
+        parts = query.data.split('_')
+        if len(parts) != 3 or parts[0] != 'ep':
+            return
+        
+        user_id = int(parts[1])
+        jm_id = parts[2]
+        
+        # 验证用户权限
+        if update.effective_user.id != user_id:
+            await query.answer("你不能操作其他用户的按钮", show_alert=True)
+            return
+        
+        # 异步下载
+        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                     text=f'正在下载章节 {jm_id}，请稍等...')
+        
+        image_paths = await jm_download_async(jm_id)
+        
         # 检查下载结果
         if not image_paths:
             await context.bot.send_message(chat_id=update.effective_chat.id,
                                             text='❌ 下载失败，未找到图片文件')
             return
+        
         # 处理和发送图片
         await process_and_send_images(context, update.effective_chat.id, jm_id, None, image_paths)
         
@@ -505,30 +668,54 @@ async def episode_button_callback(update: Update, context: ContextTypes.DEFAULT_
 async def episode_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()  # 确认回调
-    global index, max_index, episode_buttons
     
-    if query.data == "first":
-        index = 0
-    elif query.data == "prev":
-        index = max(0, index - 1)
-    elif query.data == "next":
-        index = min(max_index - 1, index + 1)
-    elif query.data == "last":
-        index = max_index - 1
-    
-    # 更新按钮显示
-    start = index * 20
-    end = start + 20
-    buttons = episode_buttons[start:end]
-    
-    # 分割按钮为n行四列
-    rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
-    
-    # 添加导航按钮作为最后一行
-    rows.append(nav_buttons)
-    
-    # 更新消息
-    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+    # 解析callback_data
+    try:
+        parts = query.data.split('_')
+        if len(parts) != 3 or parts[0] != 'nav':
+            return
+        
+        user_id = int(parts[1])
+        action = parts[2]
+        
+        # 验证用户权限
+        if update.effective_user.id != user_id:
+            await query.answer("你不能操作其他用户的按钮", show_alert=True)
+            return
+        
+        session = get_user_session(user_id)
+        
+        if action == "first":
+            session.index = 0
+        elif action == "prev":
+            session.index = max(0, session.index - 1)
+        elif action == "next":
+            session.index = min(session.max_index - 1, session.index + 1)
+        elif action == "last":
+            session.index = session.max_index - 1
+        
+        # 更新按钮显示
+        start = session.index * 20
+        end = start + 20
+        buttons = session.episode_buttons[start:end]
+        
+        # 分割按钮为n行四列
+        rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
+        
+        # 为导航按钮添加用户ID
+        user_nav_buttons = [
+            InlineKeyboardButton(text="首页", callback_data=f"nav_{user_id}_first"),
+            InlineKeyboardButton(text="上一页", callback_data=f"nav_{user_id}_prev"),
+            InlineKeyboardButton(text="下一页", callback_data=f"nav_{user_id}_next"),
+            InlineKeyboardButton(text="末页", callback_data=f"nav_{user_id}_last")
+        ]
+        rows.append(user_nav_buttons)
+        
+        # 更新消息
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+        
+    except Exception as e:
+        await query.answer(f"操作失败: {str(e)}", show_alert=True)
         
 
 async def process_and_send_images(context, chat_id, jm_id, name, image_paths):
@@ -538,18 +725,20 @@ async def process_and_send_images(context, chat_id, jm_id, name, image_paths):
         if len(image_paths) > 10:
             await context.bot.send_message(chat_id=chat_id,
                                          text=f'图片较多({len(image_paths)}张)，将分批发送...')
+        
         # 发送第一张图片作为预览
-        if name:
-            with open(image_paths[0], 'rb') as f:
+        if name and image_paths:
+            async with aiofiles.open(image_paths[0], 'rb') as f:
+                photo_data = await f.read()
                 await context.bot.send_photo(
                     chat_id=chat_id,
-                    photo=f,
+                    photo=photo_data,
                     caption=f"📋 {name} (共{len(image_paths)}张)"
                 )
+                del photo_data  # 释放内存
         
-        # 发送所有图片
-        
-        await send_images_traditional(context, chat_id, image_paths)
+        # 使用优化的发送函数
+        await send_images_optimized(context, chat_id, image_paths)
         
         # # 如果图片数量超过阈值，创建并发送压缩包
         # if ENABLE_ZIP_ARCHIVE and len(image_paths) > ZIP_THRESHOLD:
@@ -592,13 +781,17 @@ async def process_and_send_images(context, chat_id, jm_id, name, image_paths):
         # 发送完成提示
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"✅ 处理完成\n📚 《{name}》\n📷 共 {len(image_paths)} 张图片"
+            text=f"✅ 处理完成\n📚 《{name or jm_id}》\n📷 共 {len(image_paths)} 张图片"
         )
+        
+        # 发送完成后强制垃圾回收
+        gc.collect()
         
     except Exception as e:
         print(e)
         await context.bot.send_message(chat_id=chat_id,
                                      text=f'处理图片时发生错误: {str(e)}')
+        gc.collect()  # 出错时也要清理内存
 
 
 if __name__ == '__main__':
@@ -617,8 +810,8 @@ if __name__ == '__main__':
     application.add_handler(cleanup_handler)
     application.add_handler(jm_search_handler)
     application.add_handler(echo_handler)
-    application.add_handler(CallbackQueryHandler(episode_button_callback, pattern=r'^\d+$'))  # 章节按钮回调
-    application.add_handler(CallbackQueryHandler(episode_nav_callback, pattern=r'^(first|prev|next|last)$'))  # 导航按钮回调
+    application.add_handler(CallbackQueryHandler(episode_button_callback, pattern=r'^ep_\d+_\d+$'))  # 章节按钮回调
+    application.add_handler(CallbackQueryHandler(episode_nav_callback, pattern=r'^nav_\d+_(first|prev|next|last)$'))  # 导航按钮回调
 
     print("🤖 Bot 启动中...")
     print(f"📁 存储管理: {'启用' if ENABLE_STORAGE_MANAGEMENT else '禁用'}")
